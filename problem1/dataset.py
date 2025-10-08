@@ -27,12 +27,22 @@ class FontDataset(Dataset):
         #   "train": [{"path": "A/font1_A.png", "letter": "A", "font": 1}, ...],
         #   "val": [...]
         # }
-        metadata_path = os.path.join(data_dir, 'fonts_metadata.json')
+        metadata_path = os.path.join(data_dir, 'metadata.json')
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
+
+        if split == "train":
+            self.samples = metadata.get("train_samples", metadata.get("train"))
+        elif split == "val":
+            self.samples = metadata.get("val_samples", metadata.get("val"))
         
-        self.samples = metadata[split]
-        self.letter_to_id = {chr(65+i): i for i in range(26)}  # A=0, B=1, ..., Z=25
+        self.letters = metadata["letters"]
+        self.letter_to_id = {ch: i for i, ch in enumerate(self.letters)}
+
+        self.font_styles = metadata["font_styles"]
+        self.font_style_to_id = {s: i for i, s in enumerate(self.font_styles)}
+
+        self.img_size = metadata.get("image_size", 28)
     
     def __len__(self):
         return len(self.samples)
@@ -54,7 +64,8 @@ class FontDataset(Dataset):
         # 4. Normalize to [0, 1]
         # 5. Convert to tensor
         
-        image_path = os.path.join(self.data_dir, sample['path'])
+        fname = sample.get("filename", sample.get("path"))
+        image_path = os.path.join(self.data_dir, self.split, fname)
         image = Image.open(image_path).convert('L')  # Ensure grayscale
         image = image.resize((28, 28), Image.LANCZOS)
         
@@ -65,6 +76,7 @@ class FontDataset(Dataset):
         image_tensor = torch.from_numpy(image_np).unsqueeze(0)
         
         # Get letter ID
-        letter_id = self.letter_to_id[sample['letter']]
-        
+        letter_id = int(sample["letter_idx"])
+        font_style_id = self.font_style_to_id[sample["font_style"]]
+
         return image_tensor, letter_id

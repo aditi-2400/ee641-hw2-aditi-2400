@@ -12,7 +12,7 @@ from pathlib import Path
 
 from dataset import FontDataset
 from models import Generator, Discriminator
-from training_dynamics import train_gan, analyze_mode_coverage
+from training_dynamics import train_gan, analyze_mode_coverage, visualize_mode_collapse
 from fixes import train_gan_with_fix
 
 def main():
@@ -21,21 +21,23 @@ def main():
     """
     # Configuration
     config = {
-        'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+        'device': torch.device('mps' if torch.backends.mps.is_available() else 'cpu'),
         'batch_size': 64,
         'num_epochs': 100,
         'z_dim': 100,
         'learning_rate': 0.0002,
-        'data_dir': 'data/fonts',
+        'data_dir': '../data/fonts',
         'checkpoint_dir': 'checkpoints',
         'results_dir': 'results',
-        'experiment': 'vanilla',  # 'vanilla' or 'fixed'
+        'visualizations_dir': 'results/visualizations',
+        'experiment': 'fixed',  # 'vanilla' or 'fixed'
         'fix_type': 'feature_matching'  # Used if experiment='fixed'
     }
     
     # Create directories
     Path(config['checkpoint_dir']).mkdir(parents=True, exist_ok=True)
     Path(config['results_dir']).mkdir(parents=True, exist_ok=True)
+    Path(config['visualizations_dir']).mkdir(parents=True, exist_ok=True)
     
     # Initialize dataset and dataloader
     train_dataset = FontDataset(config['data_dir'], split='train')
@@ -58,7 +60,8 @@ def main():
             discriminator, 
             train_loader,
             num_epochs=config['num_epochs'],
-            device=config['device']
+            device=config['device'],
+            checkpoint_dir = config['checkpoint_dir']
         )
     else:
         print(f"Training GAN with {config['fix_type']} fix...")
@@ -67,7 +70,8 @@ def main():
             discriminator, 
             train_loader,
             num_epochs=config['num_epochs'],
-            fix_type=config['fix_type']
+            fix_type=config['fix_type'],
+            checkpoint_dir = config['checkpoint_dir']
         )
     
     # Save results
@@ -84,6 +88,11 @@ def main():
     }, f"{config['results_dir']}/best_generator.pth")
     
     print(f"Training complete. Results saved to {config['results_dir']}/")
+
+    if config['experiment'] == 'vanilla':
+        visualize_mode_collapse(history, os.path.join(config['visualizations_dir'], 'viz_vanilla.png'))
+    else:
+        visualize_mode_collapse(history, os.path.join(config['visualizations_dir'], 'viz_fix.png'))        
 
 if __name__ == '__main__':
     main()

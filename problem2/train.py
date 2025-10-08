@@ -14,46 +14,7 @@ import numpy as np
 
 from dataset import DrumPatternDataset
 from hierarchical_vae import HierarchicalDrumVAE
-from training_utils import kl_annealing_schedule, temperature_annealing_schedule
-
-def compute_hierarchical_elbo(recon_x, x, mu_low, logvar_low, mu_high, logvar_high, beta=1.0):
-    """
-    Compute Evidence Lower Bound (ELBO) for hierarchical VAE.
-    
-    ELBO = E[log p(x|z_low)] - beta * KL(q(z_low|x) || p(z_low|z_high)) 
-           - beta * KL(q(z_high|z_low) || p(z_high))
-    
-    Args:
-        recon_x: Reconstructed pattern logits [batch, 16, 9]
-        x: Original patterns [batch, 16, 9]
-        mu_low, logvar_low: Low-level latent parameters
-        mu_high, logvar_high: High-level latent parameters
-        beta: KL weight for beta-VAE
-        
-    Returns:
-        loss: Total loss
-        recon_loss: Reconstruction component
-        kl_low: KL divergence for low-level latent
-        kl_high: KL divergence for high-level latent
-    """
-    # Reconstruction loss (binary cross-entropy)
-    recon_loss = F.binary_cross_entropy_with_logits(
-        recon_x.view(-1), x.view(-1), reduction='sum'
-    )
-    
-    # KL divergence for high-level latent: KL(q(z_high) || p(z_high))
-    # where p(z_high) = N(0, I)
-    kl_high = -0.5 * torch.sum(1 + logvar_high - mu_high.pow(2) - logvar_high.exp())
-    
-    # KL divergence for low-level latent: KL(q(z_low) || p(z_low|z_high))
-    # For simplicity, we use standard KL with N(0, I) prior
-    # In practice, you might want to implement conditional prior p(z_low|z_high)
-    kl_low = -0.5 * torch.sum(1 + logvar_low - mu_low.pow(2) - logvar_low.exp())
-    
-    # Total loss
-    total_loss = recon_loss + beta * (kl_low + kl_high)
-    
-    return total_loss, recon_loss, kl_low, kl_high
+from training_utils import kl_anneal_schedule, temp_anneal_schedule
 
 def train_epoch(model, data_loader, optimizer, epoch, device, config):
     """
@@ -73,42 +34,80 @@ def train_epoch(model, data_loader, optimizer, epoch, device, config):
     }
     
     # Get annealing parameters for this epoch
-    beta = kl_annealing_schedule(epoch, method=config['kl_anneal_method'])
-    temperature = temperature_annealing_schedule(epoch)
+    beta = kl_anneal_schedule(epoch, method=config['kl_anneal_method'])
+    temperature = temp_anneal_schedule(epoch)
     
+    n_seen = 0
     for batch_idx, (patterns, styles, densities) in enumerate(data_loader):
         patterns = patterns.to(device)
         optimizer.zero_grad()
-        
         # Forward pass
-        recon, mu_low, logvar_low, mu_high, logvar_high = model(patterns, beta=beta)
+        out = model(patterns, beta=beta, temperature=temperature)
         
         # Compute loss
-        loss, recon_loss, kl_low, kl_high = compute_hierarchical_elbo(
-            recon, patterns, mu_low, logvar_low, mu_high, logvar_high, beta
-        )
+        losses = out["losses"]
+        total = losses["total"]
         
         # Backward pass
-        loss.backward()
+        total.backward()
         optimizer.step()
-        
+
+        bsz = patterns.size(0)
+        n_seen += bsz
         # Update metrics
-        metrics['total_loss'] += loss.item()
-        metrics['recon_loss'] += recon_loss.item()
-        metrics['kl_low'] += kl_low.item()
-        metrics['kl_high'] += kl_high.item()
+        metrics['total_loss'] += total.item()
+        metrics['recon_loss'] += losses["recon"].item()
+        metrics['kl_low'] += losses["kl_low"].item()
+        metrics['kl_high'] += losses["kl_high"].item()
         
         # Log progress
         if batch_idx % 10 == 0:
-            print(f'Epoch {epoch:3d} [{batch_idx:3d}/{len(data_loader)}] '
-                  f'Loss: {loss.item()/len(patterns):.4f} '
-                  f'Beta: {beta:.3f} Temp: {temperature:.2f}')
+            print(
+                f"Epoch {epoch:3d} [{batch_idx:3d}/{len(data_loader)}] "
+                f"Loss: {total.item()/bsz:.4f} "
+                f"Beta: {beta:.3f} Temp: {temperature:.2f}"
+            )
     
     # Average metrics
-    n_samples = len(data_loader.dataset)
-    for key in metrics:
-        metrics[key] /= n_samples
+    num_batches = max(1, len(data_loader))
+    for k in metrics:
+        metrics[k] /= num_batches
     
+    return metrics
+
+@torch.no_grad()
+def validate_epoch(model, data_loader, device, epoch):
+    """
+    Validation pass. Uses the model's internal ELBO terms.
+    """
+    model.eval()
+    metrics = {
+        "total_loss": 0.0,
+        "recon_loss": 0.0,
+        "kl_low": 0.0,
+        "kl_high": 0.0,
+    }
+
+    for patterns, styles, densities in data_loader:
+        patterns = patterns.to(device)
+        out = model(patterns)  
+        losses = out["losses"]
+
+        metrics["total_loss"] += losses["total"].item()
+        metrics["recon_loss"] += losses["recon"].item()
+        metrics["kl_low"] += losses["kl_low"].item()
+        metrics["kl_high"] += losses["kl_high"].item()
+
+    num_batches = max(1, len(data_loader))
+    for k in metrics:
+        metrics[k] /= num_batches
+
+    print(
+        f"Epoch {epoch:3d} Validation - "
+        f"Loss: {metrics['total_loss']:.4f} "
+        f"KL_high: {metrics['kl_high']:.4f} "
+        f"KL_low: {metrics['kl_low']:.4f}"
+    )
     return metrics
 
 def main():
@@ -117,14 +116,14 @@ def main():
     """
     # Configuration
     config = {
-        'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+        'device': torch.device('mps' if torch.backends.mps.is_available() else 'cpu'),
         'batch_size': 32,
         'num_epochs': 100,
         'learning_rate': 0.001,
         'z_high_dim': 4,
         'z_low_dim': 12,
-        'kl_anneal_method': 'cyclical',  # 'linear', 'cyclical', or 'sigmoid'
-        'data_dir': 'data/drums',
+        'kl_anneal_method': 'sigmoid',  # 'linear', 'cyclical', or 'sigmoid'
+        'data_dir': '../data/drums',
         'checkpoint_dir': 'checkpoints',
         'results_dir': 'results'
     }
@@ -178,37 +177,8 @@ def main():
         # Validate every 5 epochs
         if epoch % 5 == 0:
             model.eval()
-            val_metrics = {
-                'total_loss': 0,
-                'recon_loss': 0,
-                'kl_low': 0,
-                'kl_high': 0
-            }
-            
-            with torch.no_grad():
-                for patterns, styles, densities in val_loader:
-                    patterns = patterns.to(config['device'])
-                    recon, mu_low, logvar_low, mu_high, logvar_high = model(patterns)
-                    loss, recon_loss, kl_low, kl_high = compute_hierarchical_elbo(
-                        recon, patterns, mu_low, logvar_low, mu_high, logvar_high
-                    )
-                    
-                    val_metrics['total_loss'] += loss.item()
-                    val_metrics['recon_loss'] += recon_loss.item()
-                    val_metrics['kl_low'] += kl_low.item()
-                    val_metrics['kl_high'] += kl_high.item()
-            
-            # Average validation metrics
-            n_val = len(val_dataset)
-            for key in val_metrics:
-                val_metrics[key] /= n_val
-            
-            history['val'].append(val_metrics)
-            
-            print(f"Epoch {epoch:3d} Validation - "
-                  f"Loss: {val_metrics['total_loss']:.4f} "
-                  f"KL_high: {val_metrics['kl_high']:.4f} "
-                  f"KL_low: {val_metrics['kl_low']:.4f}")
+            val_metrics = validate_epoch(model, val_loader, config["device"], epoch)
+            history["val"].append(val_metrics)
         
         # Save checkpoint every 20 epochs
         if (epoch + 1) % 20 == 0:
@@ -223,7 +193,7 @@ def main():
     torch.save(model.state_dict(), f"{config['results_dir']}/best_model.pth")
     
     with open(f"{config['results_dir']}/training_log.json", 'w') as f:
-        json.dump(history, f, indent=2)
+        json.dump(history, f, indent=2, default=str)
     
     print(f"Training complete. Results saved to {config['results_dir']}/")
 

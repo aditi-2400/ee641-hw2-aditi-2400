@@ -7,6 +7,8 @@ from torch.utils.data import Dataset
 import numpy as np
 import json
 import os
+DEFAULT_INSTRS = ['kick','snare','hihat_closed','hihat_open','tom_low','tom_high','crash','ride','clap']
+DEFAULT_STYLES = ['rock','jazz','hiphop','electronic','latin']
 
 class DrumPatternDataset(Dataset):
     def __init__(self, data_dir, split='train'):
@@ -19,34 +21,46 @@ class DrumPatternDataset(Dataset):
         """
         self.data_dir = data_dir
         self.split = split
-        
         # Load patterns from drum_patterns.npz
-        data_path = os.path.join(data_dir, 'drum_patterns.npz')
-        data = np.load(data_path)
-        
-        # Expected structure:
-        # patterns: [N, 16, 9] binary arrays
-        # styles: [N] style labels (0-4)
-        # metadata: dict with instrument names, style names
-        
-        # Split data into train/val
-        n_samples = len(data['patterns'])
-        n_train = int(0.8 * n_samples)
+        data_path = os.path.join(data_dir, 'patterns.npz')
+        if not os.path.isfile(data_path):
+            raise FileNotFoundError(f"patterns.npz not found in {data_dir}")
+        data = np.load(data_path, allow_pickle=True)
         
         if split == 'train':
-            self.patterns = data['patterns'][:n_train]
-            self.styles = data['styles'][:n_train]
+            if not all(k in data.files for k in ['train_patterns', 'train_styles']):
+                raise KeyError(f"Expected 'train_patterns' and 'train_styles' in {data.files}")
+            patterns = data['train_patterns']
+            styles   = data['train_styles']
+        elif split == 'val':
+            if not all(k in data.files for k in ['val_patterns', 'val_styles']):
+                raise KeyError(f"Expected 'val_patterns' and 'val_styles' in {data.files}")
+            patterns = data['val_patterns']
+            styles   = data['val_styles']
         else:
-            self.patterns = data['patterns'][n_train:]
-            self.styles = data['styles'][n_train:]
+            raise ValueError(f"split must be 'train' or 'val', got {split}")
         
         # Load metadata
-        metadata_path = os.path.join(data_dir, 'drum_metadata.json')
-        with open(metadata_path, 'r') as f:
-            self.metadata = json.load(f)
-        
-        self.instrument_names = self.metadata['instruments']
-        self.style_names = self.metadata['styles']
+        json_meta = os.path.join(data_dir, 'patterns.json')
+        if os.path.isfile(json_meta):
+            with open(json_meta, 'r') as f:
+                meta = json.load(f)
+            self.instrument_names = meta['instruments']
+            self.style_names = meta['styles']
+            self.timesteps  = int(meta.get('timesteps', 16))
+
+        elif 'metadata' in data.files:
+            meta = data['metadata'].item()
+            self.instrument_names = meta.get('instruments', DEFAULT_INSTRS)
+            self.style_names      = meta.get('styles',      DEFAULT_STYLES)
+            self.timesteps        = int(meta.get('timesteps', 16))
+        else:
+            self.instrument_names = DEFAULT_INSTRS
+            self.style_names      = DEFAULT_STYLES
+            self.timesteps        = 16
+
+        self.patterns = patterns.astype(np.float32)
+        self.styles   = styles.astype(np.int64)
     
     def __len__(self):
         return len(self.patterns)
@@ -61,13 +75,13 @@ class DrumPatternDataset(Dataset):
             density: Float indicating pattern density (for analysis)
         """
         pattern = self.patterns[idx]
-        style = self.styles[idx]
+        style = int(self.styles[idx])
         
         # Convert to tensor
         pattern_tensor = torch.from_numpy(pattern).float()
         
         # Compute density metric (fraction of active hits)
-        density = pattern.sum() / (16 * 9)
+        density = float(pattern_tensor.sum().item()) / (self.timesteps * len(self.instrument_names))
         
         return pattern_tensor, style, density
     

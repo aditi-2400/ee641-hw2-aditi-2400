@@ -8,7 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-def plot_alphabet_grid(generator, device='cuda', z_dim=100, seed=None):
+def plot_alphabet_grid(generator, device='mps', z_dim=100, seed=None):
     """
     Generate and plot a grid of all 26 letters.
     
@@ -21,6 +21,7 @@ def plot_alphabet_grid(generator, device='cuda', z_dim=100, seed=None):
     Returns:
         figure: Matplotlib figure object
     """
+    device = next(generator.parameters()).device
     if seed is not None:
         torch.manual_seed(seed)
         np.random.seed(seed)
